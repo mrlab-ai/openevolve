@@ -313,7 +313,12 @@ export function showSidebarContent(d, fromHover = false) {
     if (parentNodeForDiff && parentNodeForDiff.code && parentNodeForDiff.code.trim() !== '') {
         tabNames.push('Diff');
     }
- 
+
+    // Add a Repairs tab when LLM repair was performed on this program
+    if (d.metadata && d.metadata.repair_history && d.metadata.repair_history.length > 0) {
+        tabNames.push('Repairs');
+    }
+
         let activeTab = lastSidebarTab && tabNames.includes(lastSidebarTab) ? lastSidebarTab : tabNames[0];
  
         // Helper to render tab content
@@ -449,6 +454,33 @@ export function showSidebarContent(d, fromHover = false) {
                  const parentCode = parentNode ? parentNode.code || '' : '';
                  const curCode = d.code || '';
                  return renderCodeDiff(parentCode, curCode);
+             }
+             if (tabName === 'Repairs') {
+                 const originalCode = (d.metadata && d.metadata.original_llm_code) || '';
+                 const repairedCode = d.code || '';
+                 const history = (d.metadata && d.metadata.repair_history) || [];
+                 // Attempt table
+                 const tableRows = history.map(function(entry) {
+                     const bg = entry.succeeded ? '#f2fff2' : '#fff0f0';
+                     const result = entry.succeeded ? '✓ succeeded' : '✗ failed';
+                     const errText = escapeHtml(entry.error || entry.repair_error || '');
+                     return '<tr style="background:' + bg + ';">' +
+                         '<td style="border:1px solid #ccc;padding:3px 7px;text-align:center;">' + (entry.attempt || '') + '</td>' +
+                         '<td style="border:1px solid #ccc;padding:3px 7px;">' + result + '</td>' +
+                         '<td style="border:1px solid #ccc;padding:3px 7px;font-size:0.85em;white-space:pre-wrap;word-break:break-all;">' + errText + '</td>' +
+                         '</tr>';
+                 }).join('');
+                 const tableHtml = '<table style="border-collapse:collapse;width:100%;margin-bottom:0.7em;font-size:0.91em;">' +
+                     '<thead><tr style="background:#e8e8e8;">' +
+                     '<th style="border:1px solid #ccc;padding:3px 7px;">Attempt</th>' +
+                     '<th style="border:1px solid #ccc;padding:3px 7px;">Result</th>' +
+                     '<th style="border:1px solid #ccc;padding:3px 7px;">Error</th>' +
+                     '</tr></thead><tbody>' + tableRows + '</tbody></table>';
+                 const diffHtml = originalCode
+                     ? '<div style="margin-bottom:0.3em;color:#666;font-size:0.9em;">Diff: original LLM output → repaired code</div>' +
+                       renderCodeDiff(originalCode, repairedCode)
+                     : '<div style="color:#888;font-size:0.9em;">(Original code not recorded)</div>';
+                 return tableHtml + diffHtml;
              }
              return '';
          }
