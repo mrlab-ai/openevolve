@@ -294,6 +294,17 @@ def _run_iteration_worker(
         # Get artifacts
         artifacts = _worker_evaluator.get_pending_artifacts(child_id)
 
+        # Apply LLM repair if the evaluator performed one (mirrors iteration.py)
+        repaired_code = _worker_evaluator.get_pending_repair(child_id)
+        repair_metadata: dict = {}
+        if repaired_code is not None:
+            repair_metadata["original_llm_code"] = child_code
+            repair_metadata["repair_history"] = (artifacts or {}).pop("repair_history", [])
+            child_code = repaired_code
+            logger.info(
+                f"Worker iteration {iteration}: using LLM-repaired code for program {child_id}"
+            )
+
         # Create child program
         child_program = Program(
             id=child_id,
@@ -308,6 +319,7 @@ def _run_iteration_worker(
                 "changes": changes_summary,
                 "parent_metrics": parent.metrics,
                 "island": parent_island,
+                **repair_metadata,
             },
         )
 
@@ -593,8 +605,11 @@ class ProcessParallelController:
                                 artifacts=result.artifacts,
                                 island_id=island_id,
                                 metadata={
+                                    **{
+                                        k: v for k, v in child_program.metadata.items()
+                                        if k not in ("parent_metrics", "island")
+                                    },
                                     "iteration_time": result.iteration_time,
-                                    "changes": child_program.metadata.get("changes", ""),
                                 },
                             )
 
