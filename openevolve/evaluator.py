@@ -294,7 +294,7 @@ class Evaluator:
                         "compile_error": str(repair_req),
                         "repair_context": repair_req.repair_context,
                     })
-                return {"combined_score": 0.0, "error": 0.0}
+                return repair_req.fallback_metrics
 
             except Exception as e:
                 last_exception = e
