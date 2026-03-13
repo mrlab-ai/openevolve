@@ -461,20 +461,21 @@ export function showSidebarContent(d, fromHover = false) {
                  const history = (d.metadata && d.metadata.repair_history) || [];
                  // Attempt table
                  const tableRows = history.map(function(entry) {
-                     const bg = entry.succeeded ? '#f2fff2' : '#fff0f0';
-                     const result = entry.succeeded ? '✓ succeeded' : '✗ failed';
-                     const errText = escapeHtml(entry.error || entry.repair_error || '');
-                     return '<tr style="background:' + bg + ';">' +
-                         '<td style="border:1px solid #ccc;padding:3px 7px;text-align:center;">' + (entry.attempt || '') + '</td>' +
-                         '<td style="border:1px solid #ccc;padding:3px 7px;">' + result + '</td>' +
-                         '<td style="border:1px solid #ccc;padding:3px 7px;font-size:0.85em;white-space:pre-wrap;word-break:break-all;">' + errText + '</td>' +
+                     const badge = entry.succeeded
+                         ? '<span style="display:inline-block;padding:1px 7px;border-radius:3px;background:#1a7f3c;color:#fff;font-weight:600;font-size:0.88em;">✓ ok</span>'
+                         : '<span style="display:inline-block;padding:1px 7px;border-radius:3px;background:#b91c1c;color:#fff;font-weight:600;font-size:0.88em;">✗ fail</span>';
+                     const errText = escapeHtml(entry.error || entry.repair_error || '—');
+                     return '<tr style="border-bottom:1px solid #ddd;">' +
+                         '<td style="padding:5px 10px;text-align:center;font-weight:600;color:#444;">' + (entry.attempt || '') + '</td>' +
+                         '<td style="padding:5px 10px;">' + badge + '</td>' +
+                         '<td style="padding:5px 10px;font-size:0.83em;white-space:pre-wrap;word-break:break-all;color:#333;font-family:monospace;">' + errText + '</td>' +
                          '</tr>';
                  }).join('');
-                 const tableHtml = '<table style="border-collapse:collapse;width:100%;margin-bottom:0.7em;font-size:0.91em;">' +
-                     '<thead><tr style="background:#e8e8e8;">' +
-                     '<th style="border:1px solid #ccc;padding:3px 7px;">Attempt</th>' +
-                     '<th style="border:1px solid #ccc;padding:3px 7px;">Result</th>' +
-                     '<th style="border:1px solid #ccc;padding:3px 7px;">Error</th>' +
+                 const tableHtml = '<table style="border-collapse:collapse;width:100%;margin-bottom:0.9em;font-size:0.91em;background:#fff;border:1px solid #ddd;border-radius:4px;overflow:hidden;">' +
+                     '<thead><tr style="background:#2d3748;color:#fff;">' +
+                     '<th style="padding:5px 10px;font-weight:600;text-align:center;width:70px;">#</th>' +
+                     '<th style="padding:5px 10px;font-weight:600;width:90px;">Status</th>' +
+                     '<th style="padding:5px 10px;font-weight:600;">Compiler output / notes</th>' +
                      '</tr></thead><tbody>' + tableRows + '</tbody></table>';
                  const diffHtml = originalCode
                      ? '<div style="margin-bottom:0.3em;color:#666;font-size:0.9em;">Diff: original LLM output → repaired code</div>' +

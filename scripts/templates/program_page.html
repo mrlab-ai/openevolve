@@ -46,23 +46,27 @@
     <pre>{{ program_data.metadata.original_llm_code }}</pre>
     {% endif %}
     <h3>Repair attempts:</h3>
-    <table style="border-collapse:collapse;width:100%;">
+    <table style="border-collapse:collapse;width:100%;border:1px solid #ddd;border-radius:4px;overflow:hidden;">
       <thead>
-        <tr style="background:#e8e8e8;">
-          <th style="border:1px solid #ccc;padding:6px 10px;">Attempt</th>
-          <th style="border:1px solid #ccc;padding:6px 10px;">Result</th>
-          <th style="border:1px solid #ccc;padding:6px 10px;">Error</th>
+        <tr style="background:#2d3748;color:#fff;">
+          <th style="padding:6px 10px;font-weight:600;text-align:center;width:70px;">#</th>
+          <th style="padding:6px 10px;font-weight:600;width:100px;">Status</th>
+          <th style="padding:6px 10px;font-weight:600;">Compiler output / notes</th>
         </tr>
       </thead>
       <tbody>
         {% for entry in program_data.metadata.repair_history %}
-        <tr style="{{ 'background:#f2fff2;' if entry.succeeded else 'background:#fff0f0;' }}">
-          <td style="border:1px solid #ccc;padding:6px 10px;text-align:center;">{{ entry.attempt }}</td>
-          <td style="border:1px solid #ccc;padding:6px 10px;text-align:center;">
-            {{ '✓ succeeded' if entry.succeeded else '✗ failed' }}
+        <tr style="border-bottom:1px solid #ddd;">
+          <td style="padding:6px 10px;text-align:center;font-weight:600;color:#444;">{{ entry.attempt }}</td>
+          <td style="padding:6px 10px;">
+            {% if entry.succeeded %}
+            <span style="display:inline-block;padding:1px 8px;border-radius:3px;background:#1a7f3c;color:#fff;font-weight:600;font-size:0.88em;">✓ ok</span>
+            {% else %}
+            <span style="display:inline-block;padding:1px 8px;border-radius:3px;background:#b91c1c;color:#fff;font-weight:600;font-size:0.88em;">✗ fail</span>
+            {% endif %}
           </td>
-          <td style="border:1px solid #ccc;padding:6px 10px;">
-            <pre style="margin:0;">{{ entry.error or entry.repair_error or '' }}</pre>
+          <td style="padding:6px 10px;">
+            <pre style="margin:0;font-size:0.85em;color:#333;">{{ entry.error or entry.repair_error or '—' }}</pre>
           </td>
         </tr>
         {% endfor %}
