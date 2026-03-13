@@ -402,8 +402,6 @@ class EvaluatorConfig:
     # True  → ask the LLM for SEARCH/REPLACE diffs (uses repair_diff_user template)
     # False → ask the LLM for a full rewrite     (uses repair_full_rewrite_user template)
     repair_diff_based: bool = False
-    # Diff pattern used when repair_diff_based=True; must match the template.
-    repair_diff_pattern: str = r"<<<<<<< SEARCH\n(.*?)=======\n(.*?)>>>>>>> REPLACE"
 
 
 @dataclass
