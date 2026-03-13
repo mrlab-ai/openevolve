@@ -577,7 +577,7 @@ class Evaluator:
         # --- Parse the LLM response ---
         if self.config.repair_diff_based:
             from openevolve.utils.code_utils import apply_diff
-            repaired = apply_diff(broken_code, llm_response, self.config.repair_diff_pattern)
+            repaired = apply_diff(broken_code, llm_response)
         else:
             from openevolve.utils.code_utils import parse_full_rewrite
             repaired = parse_full_rewrite(llm_response, language)
