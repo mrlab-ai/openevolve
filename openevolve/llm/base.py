@@ -20,3 +20,16 @@ class LLMInterface(ABC):
     ) -> str:
         """Generate text using a system message and conversational context"""
         pass
+
+    def get_token_usage(self) -> dict:
+        """Return accumulated token usage for this model instance.
+
+        Subclasses should override this to return actual counts.
+        """
+        return {
+            "model": "unknown",
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "calls": 0,
+        }

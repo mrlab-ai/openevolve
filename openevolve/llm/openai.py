@@ -89,6 +89,11 @@ class OpenAILLM(LLMInterface):
                 max_retries=max_retries,
             )
 
+        # Token usage counters (accumulated across all calls on this instance)
+        self.total_prompt_tokens = 0
+        self.total_completion_tokens = 0
+        self.total_calls = 0
+
         # Only log unique models to reduce duplication
         if not hasattr(logger, "_initialized_models"):
             logger._initialized_models = set()
@@ -223,7 +228,21 @@ class OpenAILLM(LLMInterface):
         logger = logging.getLogger(__name__)
         logger.debug(f"API parameters: {params}")
         logger.debug(f"API response: {response.choices[0].message.content}")
+        if response.usage and isinstance(response.usage.prompt_tokens, int):
+            self.total_prompt_tokens += response.usage.prompt_tokens
+            self.total_completion_tokens += response.usage.completion_tokens
+            self.total_calls += 1
         return response.choices[0].message.content
+
+    def get_token_usage(self) -> dict:
+        """Return accumulated token usage for this model instance."""
+        return {
+            "model": self.model,
+            "prompt_tokens": self.total_prompt_tokens,
+            "completion_tokens": self.total_completion_tokens,
+            "total_tokens": self.total_prompt_tokens + self.total_completion_tokens,
+            "calls": self.total_calls,
+        }
 
     async def _manual_wait_for_answer(
         self, params: Dict[str, Any], timeout: Optional[Union[int, float]]

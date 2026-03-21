@@ -3,6 +3,7 @@ Main controller for OpenEvolve
 """
 
 import asyncio
+import json
 import logging
 import os
 import shutil
@@ -12,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 
-from openevolve.config import Config, load_config
+from openevolve.config import Config, estimate_cost, load_config
 from openevolve.database import Program, ProgramDatabase
 from openevolve.evaluator import Evaluator
 from openevolve.evolution_trace import EvolutionTracer
@@ -376,6 +377,7 @@ class OpenEvolve:
             )
 
         finally:
+            self._log_token_usage()
             # Clean up parallel processing resources
             if self.parallel_controller:
                 self.parallel_controller.stop()
@@ -499,6 +501,89 @@ class OpenEvolve:
             )
 
         logger.info(f"Saved checkpoint at iteration {iteration} to {checkpoint_path}")
+
+    def _log_token_usage(self) -> None:
+        """Write token_usage.json to output_dir and log a one-line summary."""
+        from openevolve.process_parallel import ProcessParallelController
+
+        pc = getattr(self, "parallel_controller", None)
+        if isinstance(pc, ProcessParallelController):
+            # Data comes from worker processes via SerializableResult deltas
+            worker_usage = pc.get_token_usage()
+
+            evo_cfg = getattr(self.config.llm, "models", [])
+            repair_cfg = getattr(self.config.llm, "repair_models", []) or evo_cfg
+
+            report: Dict[str, Any] = {}
+            grand_prompt = grand_completion = grand_calls = 0
+            grand_cost: Optional[float] = None
+
+            for role, model_cfgs in (("evolution", evo_cfg), ("repair", repair_cfg)):
+                counts = worker_usage.get(role, {})
+                # NOTE: in parallel mode we only have aggregate token counts
+                # across all workers, not per-model splits.  The weighted-average
+                # rate is exact for single-model ensembles and a close
+                # approximation for multi-model ensembles (tokens are distributed
+                # roughly proportional to model weights by construction).
+                cost = estimate_cost(
+                    counts.get("prompt_tokens", 0),
+                    counts.get("completion_tokens", 0),
+                    model_cfgs,
+                )
+                report[role] = dict(
+                    counts,
+                    total_tokens=counts.get("prompt_tokens", 0) + counts.get("completion_tokens", 0),
+                    estimated_cost_usd=cost,
+                )
+                grand_prompt += counts.get("prompt_tokens", 0)
+                grand_completion += counts.get("completion_tokens", 0)
+                grand_calls += counts.get("calls", 0)
+                if cost is not None:
+                    grand_cost = (0.0 if grand_cost is None else grand_cost) + cost
+        else:
+            # Non-parallel mode: read from main-process ensemble instances
+            ensembles = {
+                "evolution": getattr(self, "llm_ensemble", None),
+                "repair": getattr(self, "llm_repair_ensemble", None),
+            }
+            report = {}
+            grand_prompt = grand_completion = grand_calls = 0
+            grand_cost = None
+            for role, ensemble in ensembles.items():
+                if ensemble is None:
+                    continue
+                usage = ensemble.get_token_usage()
+                t = usage["total"]
+                report[role] = {
+                    "prompt_tokens": t["prompt_tokens"],
+                    "completion_tokens": t["completion_tokens"],
+                    "total_tokens": t["total_tokens"],
+                    "calls": t["calls"],
+                    "estimated_cost_usd": t.get("estimated_cost_usd"),
+                }
+                grand_prompt += t["prompt_tokens"]
+                grand_completion += t["completion_tokens"]
+                grand_calls += t["calls"]
+                if t.get("estimated_cost_usd") is not None:
+                    grand_cost = (0.0 if grand_cost is None else grand_cost) + t["estimated_cost_usd"]
+
+        report["grand_total"] = {
+            "prompt_tokens": grand_prompt,
+            "completion_tokens": grand_completion,
+            "total_tokens": grand_prompt + grand_completion,
+            "calls": grand_calls,
+            "estimated_cost_usd": grand_cost,
+        }
+
+        usage_path = os.path.join(self.output_dir, "token_usage.json")
+        with open(usage_path, "w") as f:
+            json.dump(report, f, indent=2)
+
+        cost_str = f"  estimated cost ${grand_cost:.4f}" if grand_cost is not None else ""
+        logger.info(
+            f"Token usage: {grand_prompt:,} in + {grand_completion:,} out"
+            f" = {grand_prompt + grand_completion:,} total ({grand_calls} calls){cost_str}"
+        )
 
     def _load_checkpoint(self, checkpoint_path: str) -> None:
         """Load state from a checkpoint directory"""

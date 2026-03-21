@@ -47,6 +47,42 @@ def _resolve_env_var(value: Optional[str]) -> Optional[str]:
     return env_value
 
 
+def estimate_cost(
+    prompt_tokens: int,
+    completion_tokens: int,
+    model_cfgs: List["LLMModelConfig"],
+) -> Optional[float]:
+    """Estimate USD cost from token counts and a list of model configs.
+
+    Uses a weight-normalised average of each model's per-token rates so that
+    ensembles with heterogeneous pricing are handled correctly.  Returns None
+    if no model has cost rates configured.
+    """
+    if not model_cfgs:
+        return None
+
+    total_weight = 0.0
+    weighted_input = 0.0
+    weighted_output = 0.0
+    for cfg in model_cfgs:
+        if cfg.input_cost_per_mtok is None or cfg.output_cost_per_mtok is None:
+            continue
+        w = cfg.weight
+        weighted_input += w * cfg.input_cost_per_mtok
+        weighted_output += w * cfg.output_cost_per_mtok
+        total_weight += w
+
+    if total_weight == 0.0:
+        return None
+
+    avg_input_rate = weighted_input / total_weight
+    avg_output_rate = weighted_output / total_weight
+    return (
+        prompt_tokens / 1_000_000 * avg_input_rate
+        + completion_tokens / 1_000_000 * avg_output_rate
+    )
+
+
 @dataclass
 class LLMModelConfig:
     """Configuration for a single LLM model"""
@@ -82,6 +118,10 @@ class LLMModelConfig:
     # Manual mode (human-in-the-loop)
     manual_mode: Optional[bool] = None
     _manual_queue_dir: Optional[str] = None
+
+    # Optional cost rates for token spend estimation (USD per million tokens)
+    input_cost_per_mtok: Optional[float] = None
+    output_cost_per_mtok: Optional[float] = None
 
     def __post_init__(self):
         """Post-initialization to resolve ${VAR} env var references in api_key"""
