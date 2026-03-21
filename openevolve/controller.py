@@ -520,26 +520,28 @@ class OpenEvolve:
 
             for role, model_cfgs in (("evolution", evo_cfg), ("repair", repair_cfg)):
                 counts = worker_usage.get(role, {})
-                # NOTE: in parallel mode we only have aggregate token counts
-                # across all workers, not per-model splits.  The weighted-average
-                # rate is exact for single-model ensembles and a close
-                # approximation for multi-model ensembles (tokens are distributed
-                # roughly proportional to model weights by construction).
-                cost = estimate_cost(
-                    counts.get("prompt_tokens", 0),
-                    counts.get("completion_tokens", 0),
-                    model_cfgs,
-                )
-                report[role] = dict(
-                    counts,
-                    total_tokens=counts.get("prompt_tokens", 0) + counts.get("completion_tokens", 0),
-                    estimated_cost_usd=cost,
-                )
+                cfg_by_name = {cfg.name: cfg for cfg in model_cfgs}
+                by_model_with_cost = []
+                role_cost = None
+                for m in counts.get("by_model", []):
+                    cfg = cfg_by_name.get(m["model"])
+                    model_cost = estimate_cost(m["prompt_tokens"], m["completion_tokens"], [cfg]) if cfg else None
+                    by_model_with_cost.append({**m, "estimated_cost_usd": model_cost})
+                    if model_cost is not None:
+                        role_cost = (0.0 if role_cost is None else role_cost) + model_cost
+                report[role] = {
+                    "prompt_tokens": counts.get("prompt_tokens", 0),
+                    "completion_tokens": counts.get("completion_tokens", 0),
+                    "total_tokens": counts.get("total_tokens", 0),
+                    "calls": counts.get("calls", 0),
+                    "estimated_cost_usd": role_cost,
+                    "by_model": by_model_with_cost,
+                }
                 grand_prompt += counts.get("prompt_tokens", 0)
                 grand_completion += counts.get("completion_tokens", 0)
                 grand_calls += counts.get("calls", 0)
-                if cost is not None:
-                    grand_cost = (0.0 if grand_cost is None else grand_cost) + cost
+                if role_cost is not None:
+                    grand_cost = (0.0 if grand_cost is None else grand_cost) + role_cost
         else:
             # Non-parallel mode: read from main-process ensemble instances
             ensembles = {
@@ -560,6 +562,7 @@ class OpenEvolve:
                     "total_tokens": t["total_tokens"],
                     "calls": t["calls"],
                     "estimated_cost_usd": t.get("estimated_cost_usd"),
+                    "by_model": usage.get("by_model", []),
                 }
                 grand_prompt += t["prompt_tokens"]
                 grand_completion += t["completion_tokens"]

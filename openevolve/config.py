@@ -480,7 +480,7 @@ class Config:
     # Evolution settings
     diff_based_evolution: bool = True
     max_code_length: int = 10000
-    diff_pattern: str = r"<<<<<<< SEARCH\n(.*?)=======\n(.*?)>>>>>>> REPLACE"
+    diff_pattern: str = r"(?i)<{3,}[^\n]*SEARCH[ \t]*\n(.*?)={3,}[ \t]*\n(.*?)>{3,}[^\n]*REPLACE[ \t]*"
 
     # Early stopping settings
     early_stopping_patience: Optional[int] = None

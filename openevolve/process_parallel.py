@@ -139,24 +139,52 @@ def _lazy_init_worker_components():
 _ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
 
 
-def _snapshot_token_totals(ensemble) -> Dict[str, int]:
+def _zero_role_usage() -> Dict[str, Any]:
+    return {"total": {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}, "by_model": []}
+
+
+def _snapshot_token_totals(ensemble) -> Dict[str, Any]:
     """Return a snapshot of cumulative token counts from an ensemble (or zeros if unavailable)."""
     if ensemble is None:
-        return dict(_ZERO_USAGE)
-    t = ensemble.get_token_usage()["total"]
-    return {"prompt_tokens": t["prompt_tokens"], "completion_tokens": t["completion_tokens"], "calls": t["calls"]}
+        return _zero_role_usage()
+    usage = ensemble.get_token_usage()
+    t = usage["total"]
+    by_model = [
+        {
+            "model": m["model"],
+            "prompt_tokens": m["prompt_tokens"],
+            "completion_tokens": m["completion_tokens"],
+            "calls": m["calls"],
+        }
+        for m in usage.get("by_model", [])
+    ]
+    return {
+        "total": {"prompt_tokens": t["prompt_tokens"], "completion_tokens": t["completion_tokens"], "calls": t["calls"]},
+        "by_model": by_model,
+    }
 
 
-def _token_delta(before: Dict[str, int], after: Dict[str, int]) -> Dict[str, int]:
-    return {k: after[k] - before[k] for k in before}
+def _token_delta(before: Dict[str, Any], after: Dict[str, Any]) -> Dict[str, Any]:
+    total_delta = {k: after["total"][k] - before["total"][k] for k in _ZERO_USAGE}
+    before_by_name = {m["model"]: m for m in before["by_model"]}
+    by_model_delta = []
+    for a in after["by_model"]:
+        b = before_by_name.get(a["model"], {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0})
+        by_model_delta.append({
+            "model": a["model"],
+            "prompt_tokens": a["prompt_tokens"] - b["prompt_tokens"],
+            "completion_tokens": a["completion_tokens"] - b["completion_tokens"],
+            "calls": a["calls"] - b["calls"],
+        })
+    return {"total": total_delta, "by_model": by_model_delta}
 
 
 def _run_iteration_worker(
     iteration: int, db_snapshot: Dict[str, Any], parent_id: str, inspiration_ids: List[str]
 ) -> SerializableResult:
     """Run a single iteration in a worker process"""
-    evo_before = dict(_ZERO_USAGE)
-    repair_before = dict(_ZERO_USAGE)
+    evo_before = _zero_role_usage()
+    repair_before = _zero_role_usage()
 
     try:
         # Lazy initialization
@@ -238,7 +266,7 @@ def _run_iteration_worker(
             return SerializableResult(
                 error=f"LLM generation failed: {str(e)}",
                 iteration=iteration,
-                token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
+                token_usage={"evolution": evo_delta, "repair": _zero_role_usage()},
             )
 
         # Capture evolution token delta immediately after generation
@@ -250,7 +278,7 @@ def _run_iteration_worker(
             return SerializableResult(
                 error="LLM returned None response",
                 iteration=iteration,
-                token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
+                token_usage={"evolution": evo_delta, "repair": _zero_role_usage()},
             )
 
         # Parse response based on evolution mode
@@ -260,17 +288,25 @@ def _run_iteration_worker(
                 apply_diff_blocks,
                 extract_diffs,
                 format_diff_summary,
+                parse_full_rewrite,
                 split_diffs_by_target,
             )
 
             diff_blocks = extract_diffs(llm_response, _worker_config.diff_pattern)
             if not diff_blocks:
-                return SerializableResult(
-                    error="No valid diffs found in response", iteration=iteration,
-                    token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
+                fallback_code = parse_full_rewrite(llm_response, _worker_config.language)
+                if not fallback_code:
+                    return SerializableResult(
+                        error="No valid diffs found in response", iteration=iteration,
+                        token_usage={"evolution": evo_delta, "repair": _zero_role_usage()},
+                    )
+                logger.warning(
+                    f"Iteration {iteration}: No valid diffs found; "
+                    f"falling back to last code block in response"
                 )
-
-            if _worker_config.prompt.programs_as_changes_description:
+                child_code = fallback_code
+                changes_summary = "Full rewrite (diff fallback)"
+            elif _worker_config.prompt.programs_as_changes_description:
                 try:
                     code_blocks, desc_blocks, _unmatched = split_diffs_by_target(
                         diff_blocks,
@@ -281,7 +317,7 @@ def _run_iteration_worker(
                     return SerializableResult(
                         error=str(e),
                         iteration=iteration,
-                        token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
+                        token_usage={"evolution": evo_delta, "repair": _zero_role_usage()},
                     )
 
                 child_code, _ = apply_diff_blocks(parent.code, code_blocks)
@@ -298,7 +334,7 @@ def _run_iteration_worker(
                     return SerializableResult(
                         error="changes_description was not updated or empty, program is discarded",
                         iteration=iteration,
-                        token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
+                        token_usage={"evolution": evo_delta, "repair": _zero_role_usage()},
                     )
 
                 changes_summary = format_diff_summary(
@@ -321,7 +357,7 @@ def _run_iteration_worker(
             if not new_code:
                 return SerializableResult(
                     error="No valid code found in response", iteration=iteration,
-                    token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
+                    token_usage={"evolution": evo_delta, "repair": _zero_role_usage()},
                 )
 
             child_code = new_code
@@ -332,7 +368,7 @@ def _run_iteration_worker(
             return SerializableResult(
                 error=f"Generated code exceeds maximum length ({len(child_code)} > {_worker_config.max_code_length})",
                 iteration=iteration,
-                token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
+                token_usage={"evolution": evo_delta, "repair": _zero_role_usage()},
             )
 
         # Evaluate the child program
@@ -443,24 +479,32 @@ class ProcessParallelController:
         self.num_islands = config.database.num_islands
 
         # Accumulated token usage from all worker results
-        self._token_usage: Dict[str, Dict[str, int]] = {
-            "evolution": {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0},
-            "repair":    {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0},
+        # by_model is a dict keyed by model name for O(1) accumulation
+        self._token_usage: Dict[str, Any] = {
+            "evolution": {"total": {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}, "by_model": {}},
+            "repair":    {"total": {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}, "by_model": {}},
         }
 
         logger.info(f"Initialized process parallel controller with {self.num_workers} workers")
 
     def get_token_usage(self) -> Dict[str, Any]:
-        """Return accumulated token usage from all worker iterations."""
+        """Return accumulated token usage from all worker iterations, with per-model breakdown."""
         result = {}
-        grand = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
-        for role, counts in self._token_usage.items():
-            result[role] = dict(counts)
-            result[role]["total_tokens"] = counts["prompt_tokens"] + counts["completion_tokens"]
-            for k in ("prompt_tokens", "completion_tokens", "calls"):
-                grand[k] += counts[k]
-        grand["total_tokens"] = grand["prompt_tokens"] + grand["completion_tokens"]
-        result["grand_total"] = grand
+        for role, data in self._token_usage.items():
+            t = data["total"]
+            by_model_list = [
+                {
+                    "model": name,
+                    **counts,
+                    "total_tokens": counts["prompt_tokens"] + counts["completion_tokens"],
+                }
+                for name, counts in data["by_model"].items()
+            ]
+            result[role] = {
+                **t,
+                "total_tokens": t["prompt_tokens"] + t["completion_tokens"],
+                "by_model": by_model_list,
+            }
         return result
 
     def _serialize_config(self, config: Config) -> dict:
@@ -660,9 +704,17 @@ class ProcessParallelController:
 
                 if result.token_usage:
                     for role, delta in result.token_usage.items():
-                        if role in self._token_usage:
+                        if role not in self._token_usage:
+                            continue
+                        t = delta.get("total", {})
+                        for k in ("prompt_tokens", "completion_tokens", "calls"):
+                            self._token_usage[role]["total"][k] += t.get(k, 0)
+                        for m in delta.get("by_model", []):
+                            name = m["model"]
+                            if name not in self._token_usage[role]["by_model"]:
+                                self._token_usage[role]["by_model"][name] = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
                             for k in ("prompt_tokens", "completion_tokens", "calls"):
-                                self._token_usage[role][k] += delta.get(k, 0)
+                                self._token_usage[role]["by_model"][name][k] += m.get(k, 0)
 
                 if result.error:
                     logger.warning(f"Iteration {completed_iteration} error: {result.error}")
