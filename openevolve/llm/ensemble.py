@@ -84,6 +84,35 @@ class LLMEnsemble:
         tasks = [self.generate(prompt, **kwargs) for prompt in prompts]
         return await asyncio.gather(*tasks)
 
+    def get_token_usage(self) -> dict:
+        """Return accumulated token usage across all models, with optional cost estimate."""
+        from openevolve.config import estimate_cost
+
+        by_model = []
+        totals = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "calls": 0,
+            "estimated_cost_usd": None,
+        }
+
+        for model, cfg in zip(self.models, self.models_cfg):
+            usage = model.get_token_usage()
+            cost = estimate_cost(
+                usage["prompt_tokens"], usage["completion_tokens"], [cfg]
+            )
+            usage["estimated_cost_usd"] = cost
+            by_model.append(usage)
+            totals["prompt_tokens"] += usage["prompt_tokens"]
+            totals["completion_tokens"] += usage["completion_tokens"]
+            totals["total_tokens"] += usage["total_tokens"]
+            totals["calls"] += usage["calls"]
+            if cost is not None:
+                totals["estimated_cost_usd"] = (0.0 if totals["estimated_cost_usd"] is None else totals["estimated_cost_usd"]) + cost
+
+        return {"by_model": by_model, "total": totals}
+
     async def generate_all_with_context(
         self, system_message: str, messages: List[Dict[str, str]], **kwargs
     ) -> str:

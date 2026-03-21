@@ -34,6 +34,7 @@ class SerializableResult:
     iteration: int = 0
     error: Optional[str] = None
     target_island: Optional[int] = None  # Island where child should be placed
+    token_usage: Optional[Dict[str, Any]] = None  # Per-iteration token deltas
 
 
 def _worker_init(config_dict: dict, evaluation_file: str, parent_env: dict = None) -> None:
@@ -135,10 +136,28 @@ def _lazy_init_worker_components():
         )
 
 
+_ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+
+
+def _snapshot_token_totals(ensemble) -> Dict[str, int]:
+    """Return a snapshot of cumulative token counts from an ensemble (or zeros if unavailable)."""
+    if ensemble is None:
+        return dict(_ZERO_USAGE)
+    t = ensemble.get_token_usage()["total"]
+    return {"prompt_tokens": t["prompt_tokens"], "completion_tokens": t["completion_tokens"], "calls": t["calls"]}
+
+
+def _token_delta(before: Dict[str, int], after: Dict[str, int]) -> Dict[str, int]:
+    return {k: after[k] - before[k] for k in before}
+
+
 def _run_iteration_worker(
     iteration: int, db_snapshot: Dict[str, Any], parent_id: str, inspiration_ids: List[str]
 ) -> SerializableResult:
     """Run a single iteration in a worker process"""
+    evo_before = dict(_ZERO_USAGE)
+    repair_before = dict(_ZERO_USAGE)
+
     try:
         # Lazy initialization
         _lazy_init_worker_components()
@@ -199,6 +218,12 @@ def _run_iteration_worker(
 
         iteration_start = time.time()
 
+        # Snapshot token usage before generation
+        evo_before = _snapshot_token_totals(_worker_llm_ensemble)
+        repair_before = _snapshot_token_totals(
+            getattr(_worker_evaluator, "repair_llm_ensemble", None)
+        )
+
         # Generate code modification (sync wrapper for async)
         try:
             llm_response = asyncio.run(
@@ -209,11 +234,24 @@ def _run_iteration_worker(
             )
         except Exception as e:
             logger.error(f"LLM generation failed: {e}")
-            return SerializableResult(error=f"LLM generation failed: {str(e)}", iteration=iteration)
+            evo_delta = _token_delta(evo_before, _snapshot_token_totals(_worker_llm_ensemble))
+            return SerializableResult(
+                error=f"LLM generation failed: {str(e)}",
+                iteration=iteration,
+                token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
+            )
+
+        # Capture evolution token delta immediately after generation
+        evo_after_gen = _snapshot_token_totals(_worker_llm_ensemble)
+        evo_delta = _token_delta(evo_before, evo_after_gen)
 
         # Check for None response
         if llm_response is None:
-            return SerializableResult(error="LLM returned None response", iteration=iteration)
+            return SerializableResult(
+                error="LLM returned None response",
+                iteration=iteration,
+                token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
+            )
 
         # Parse response based on evolution mode
         if _worker_config.diff_based_evolution:
@@ -228,7 +266,8 @@ def _run_iteration_worker(
             diff_blocks = extract_diffs(llm_response, _worker_config.diff_pattern)
             if not diff_blocks:
                 return SerializableResult(
-                    error="No valid diffs found in response", iteration=iteration
+                    error="No valid diffs found in response", iteration=iteration,
+                    token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
                 )
 
             if _worker_config.prompt.programs_as_changes_description:
@@ -239,7 +278,11 @@ def _run_iteration_worker(
                         changes_description_text=parent_changes_desc,
                     )
                 except Exception as e:
-                    return SerializableResult(error=str(e), iteration=iteration)
+                    return SerializableResult(
+                        error=str(e),
+                        iteration=iteration,
+                        token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
+                    )
 
                 child_code, _ = apply_diff_blocks(parent.code, code_blocks)
                 child_changes_desc, desc_applied = apply_diff_blocks(
@@ -255,6 +298,7 @@ def _run_iteration_worker(
                     return SerializableResult(
                         error="changes_description was not updated or empty, program is discarded",
                         iteration=iteration,
+                        token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
                     )
 
                 changes_summary = format_diff_summary(
@@ -276,7 +320,8 @@ def _run_iteration_worker(
             new_code = parse_full_rewrite(llm_response, _worker_config.language)
             if not new_code:
                 return SerializableResult(
-                    error=f"No valid code found in response", iteration=iteration
+                    error="No valid code found in response", iteration=iteration,
+                    token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
                 )
 
             child_code = new_code
@@ -287,6 +332,7 @@ def _run_iteration_worker(
             return SerializableResult(
                 error=f"Generated code exceeds maximum length ({len(child_code)} > {_worker_config.max_code_length})",
                 iteration=iteration,
+                token_usage={"evolution": evo_delta, "repair": dict(_ZERO_USAGE)},
             )
 
         # Evaluate the child program
@@ -329,6 +375,15 @@ def _run_iteration_worker(
 
         iteration_time = time.time() - iteration_start
 
+        # Capture repair delta (evo was already captured right after generation)
+        repair_after = _snapshot_token_totals(
+            getattr(_worker_evaluator, "repair_llm_ensemble", None)
+        )
+        token_usage = {
+            "evolution": evo_delta,
+            "repair": _token_delta(repair_before, repair_after),
+        }
+
         # Get target island from snapshot (where child should be placed)
         target_island = db_snapshot.get("sampling_island")
 
@@ -341,11 +396,25 @@ def _run_iteration_worker(
             artifacts=artifacts,
             iteration=iteration,
             target_island=target_island,
+            token_usage=token_usage,
         )
 
     except Exception as e:
         logger.exception(f"Error in worker iteration {iteration}")
-        return SerializableResult(error=str(e), iteration=iteration)
+        usage = None
+        try:
+            if "_worker_llm_ensemble" in globals() and "_worker_evaluator" in globals():
+                ea = _snapshot_token_totals(_worker_llm_ensemble)
+                ra = _snapshot_token_totals(
+                    getattr(_worker_evaluator, "repair_llm_ensemble", None)
+                )
+                usage = {
+                    "evolution": _token_delta(evo_before, ea),
+                    "repair": _token_delta(repair_before, ra),
+                }
+        except Exception:
+            pass
+        return SerializableResult(error=str(e), iteration=iteration, token_usage=usage)
 
 
 class ProcessParallelController:
@@ -373,7 +442,26 @@ class ProcessParallelController:
         self.num_workers = config.evaluator.parallel_evaluations
         self.num_islands = config.database.num_islands
 
+        # Accumulated token usage from all worker results
+        self._token_usage: Dict[str, Dict[str, int]] = {
+            "evolution": {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0},
+            "repair":    {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0},
+        }
+
         logger.info(f"Initialized process parallel controller with {self.num_workers} workers")
+
+    def get_token_usage(self) -> Dict[str, Any]:
+        """Return accumulated token usage from all worker iterations."""
+        result = {}
+        grand = {"prompt_tokens": 0, "completion_tokens": 0, "calls": 0}
+        for role, counts in self._token_usage.items():
+            result[role] = dict(counts)
+            result[role]["total_tokens"] = counts["prompt_tokens"] + counts["completion_tokens"]
+            for k in ("prompt_tokens", "completion_tokens", "calls"):
+                grand[k] += counts[k]
+        grand["total_tokens"] = grand["prompt_tokens"] + grand["completion_tokens"]
+        result["grand_total"] = grand
+        return result
 
     def _serialize_config(self, config: Config) -> dict:
         """Serialize config object to a dictionary that can be pickled"""
@@ -569,6 +657,12 @@ class ProcessParallelController:
                 # Use evaluator timeout + buffer to gracefully handle stuck processes
                 timeout_seconds = self.config.evaluator.timeout + 30
                 result = future.result(timeout=timeout_seconds)
+
+                if result.token_usage:
+                    for role, delta in result.token_usage.items():
+                        if role in self._token_usage:
+                            for k in ("prompt_tokens", "completion_tokens", "calls"):
+                                self._token_usage[role][k] += delta.get(k, 0)
 
                 if result.error:
                     logger.warning(f"Iteration {completed_iteration} error: {result.error}")
