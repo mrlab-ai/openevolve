@@ -99,10 +99,20 @@ async def run_iteration_with_shared_db(
             diff_blocks = extract_diffs(llm_response, config.diff_pattern)
 
             if not diff_blocks:
-                logger.warning(f"Iteration {iteration+1}: No valid diffs found in response")
-                return None
-
-            if config.prompt.programs_as_changes_description:
+                fallback_code = parse_full_rewrite(llm_response, config.language)
+                if not fallback_code:
+                    logger.warning(
+                        f"Iteration {iteration+1}: No valid diffs found in response. "
+                        f"Raw response (first 1000 chars): {llm_response[:1000]!r}"
+                    )
+                    return None
+                logger.warning(
+                    f"Iteration {iteration+1}: No valid diffs found; "
+                    f"falling back to last code block in response"
+                )
+                child_code = fallback_code
+                changes_summary = "Full rewrite (diff fallback)"
+            elif config.prompt.programs_as_changes_description:
                 try:
                     code_blocks, desc_blocks, _unmatched = split_diffs_by_target(
                         diff_blocks,
