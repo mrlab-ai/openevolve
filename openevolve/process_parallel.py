@@ -4,6 +4,7 @@ Process-based parallel controller for true parallelism
 
 import asyncio
 import logging
+import os
 import multiprocessing as mp
 import pickle
 import signal
@@ -372,6 +373,7 @@ def _run_iteration_worker(
             )
 
         # Evaluate the child program
+        os.environ["OPENEVOLVE_PROCESS_ITERATION"] = str(iteration)
         import uuid
 
         child_id = str(uuid.uuid4())

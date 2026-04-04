@@ -172,6 +172,7 @@ async def run_iteration_with_shared_db(
             return None
 
         # Evaluate the child program
+        os.environ["OPENEVOLVE_PROCESS_ITERATION"] = str(iteration)
         child_id = str(uuid.uuid4())
         result.child_metrics = await evaluator.evaluate_program(child_code, child_id)
 

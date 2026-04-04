@@ -294,6 +294,7 @@ class OpenEvolve:
             initial_program_id = str(uuid.uuid4())
 
             # Evaluate the initial program
+            os.environ["OPENEVOLVE_PROCESS_ITERATION"] = str(start_iteration)
             initial_metrics = await self.evaluator.evaluate_program(
                 self.initial_program_code, initial_program_id
             )
