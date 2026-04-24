@@ -1774,8 +1774,8 @@ class ProgramDatabase:
 
     def should_migrate(self) -> bool:
         """Check if migration should occur based on generation counters"""
-        max_generation = max(self.island_generations)
-        return (max_generation - self.last_migration_generation) >= self.migration_interval
+        min_generation = min(self.island_generations)
+        return (min_generation - self.last_migration_generation) >= self.migration_interval
 
     def migrate_programs(self) -> None:
         """
