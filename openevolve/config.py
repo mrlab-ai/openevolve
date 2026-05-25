@@ -379,6 +379,7 @@ class DatabaseConfig:
         },
     )
     feature_bins: Union[int, Dict[str, int]] = 10  # Can be int (all dims) or dict (per-dim)
+    feature_scaling_method: str = "minmax"  # Options: "minmax", "percentile", "zscore"
     diversity_reference_size: int = 20  # Size of reference set for diversity calculation
 
     # Migration parameters for island-based evolution
