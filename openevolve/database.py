@@ -186,7 +186,7 @@ class ProgramDatabase:
 
         # Feature scaling infrastructure
         self.feature_stats: Dict[str, Dict[str, Union[float, float, List[float]]]] = {}
-        self.feature_scaling_method: str = "minmax"  # Options: minmax, zscore, percentile
+        self.feature_scaling_method: str = getattr(config, "feature_scaling_method", "minmax")  # Options: minmax, zscore, percentile
 
         # Per-dimension bins support
         if hasattr(config, "feature_bins") and isinstance(config.feature_bins, dict):
