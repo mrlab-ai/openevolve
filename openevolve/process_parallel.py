@@ -38,13 +38,22 @@ class SerializableResult:
     token_usage: Optional[Dict[str, Any]] = None  # Per-iteration token deltas
 
 
-def _worker_init(config_dict: dict, evaluation_file: str, parent_env: dict = None) -> None:
+def _worker_init(
+    config_dict: dict,
+    evaluation_file: str,
+    parent_env: dict = None,
+    shutdown_event=None,
+) -> None:
     """Initialize worker process with necessary components"""
     import os
 
     # Set environment from parent process
     if parent_env:
         os.environ.update(parent_env)
+
+    from openevolve.llm.subscription import _set_shutdown_event
+
+    _set_shutdown_event(shutdown_event)
 
     global _worker_config
     global _worker_evaluation_file
@@ -473,7 +482,13 @@ class ProcessParallelController:
         self.file_suffix = file_suffix
 
         self.executor: Optional[ProcessPoolExecutor] = None
-        self.shutdown_event = mp.Event()
+        self._mp_context = (
+            mp.get_context("spawn") if config.max_tasks_per_child is not None else mp.get_context()
+        )
+        self.shutdown_event = self._mp_context.Event()
+        from openevolve.llm.subscription import _set_shutdown_event
+
+        _set_shutdown_event(self.shutdown_event)
         self.early_stopping_triggered = False
 
         # Number of worker processes
@@ -559,7 +574,13 @@ class ProcessParallelController:
         executor_kwargs = {
             "max_workers": self.num_workers,
             "initializer": _worker_init,
-            "initargs": (config_dict, self.evaluation_file, current_env),
+            "initargs": (
+                config_dict,
+                self.evaluation_file,
+                current_env,
+                self.shutdown_event,
+            ),
+            "mp_context": self._mp_context,
         }
         if sys.version_info >= (3, 11):
             logger.info(f"Set max {self.config.max_tasks_per_child} tasks per child")
@@ -569,7 +590,7 @@ class ProcessParallelController:
                 "max_tasks_per_child is only supported in Python 3.11+. "
                 "Ignoring max_tasks_per_child and using spawn start method."
             )
-            executor_kwargs["mp_context"] = mp.get_context("spawn")
+            executor_kwargs["mp_context"] = self._mp_context
 
         # Create process pool with initializer
         self.executor = ProcessPoolExecutor(**executor_kwargs)
@@ -582,6 +603,10 @@ class ProcessParallelController:
         if self.executor:
             self.executor.shutdown(wait=True)
             self.executor = None
+
+        from openevolve.llm.subscription import _set_shutdown_event
+
+        _set_shutdown_event(None)
 
         logger.info("Stopped process pool")
 

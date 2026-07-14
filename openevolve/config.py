@@ -18,6 +18,18 @@ if TYPE_CHECKING:
 _ENV_VAR_PATTERN = re.compile(r"^\$\{([^}]+)\}$")  # ${VAR}
 
 
+def _discard_llm_api_keys(config_dict: Dict[str, Any]) -> None:
+    """Remove API credentials that a non-API backend will not use."""
+    llm = config_dict.get("llm")
+    if not isinstance(llm, dict):
+        return
+    llm.pop("api_key", None)
+    for group in ("models", "evaluator_models", "repair_models"):
+        for model in llm.get(group) or []:
+            if isinstance(model, dict):
+                model.pop("api_key", None)
+
+
 def _resolve_env_var(value: Optional[str]) -> Optional[str]:
     """
     Resolve ${VAR} environment variable reference in a string value.
@@ -491,11 +503,15 @@ class Config:
     max_tasks_per_child: Optional[int] = None
 
     @classmethod
-    def from_yaml(cls, path: Union[str, Path]) -> "Config":
+    def from_yaml(
+        cls, path: Union[str, Path], *, ignore_api_keys: bool = False
+    ) -> "Config":
         """Load configuration from a YAML file"""
         config_path = Path(path).resolve()
         with open(config_path, "r") as f:
             config_dict = yaml.safe_load(f)
+        if ignore_api_keys:
+            _discard_llm_api_keys(config_dict)
         config = cls.from_dict(config_dict)
 
         # Resolve template_dir relative to config file location
@@ -551,10 +567,12 @@ class Config:
             yaml.dump(self.to_dict(), f, default_flow_style=False)
 
 
-def load_config(config_path: Optional[Union[str, Path]] = None) -> Config:
+def load_config(
+    config_path: Optional[Union[str, Path]] = None, *, ignore_api_keys: bool = False
+) -> Config:
     """Load configuration from a YAML file or use defaults"""
     if config_path and os.path.exists(config_path):
-        config = Config.from_yaml(config_path)
+        config = Config.from_yaml(config_path, ignore_api_keys=ignore_api_keys)
     else:
         config = Config()
 

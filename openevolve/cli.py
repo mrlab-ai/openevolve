@@ -11,6 +11,12 @@ from typing import Dict, List, Optional
 
 from openevolve import OpenEvolve
 from openevolve.config import Config, load_config
+from openevolve.llm.subscription import init_claude, init_codex
+from openevolve.model_profiles import (
+    DEFAULT_CLAUDE_MODEL,
+    DEFAULT_CODEX_MODEL,
+    DEFAULT_CODEX_REASONING_EFFORT,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,13 +57,75 @@ def parse_args() -> argparse.Namespace:
         default=None,
     )
 
+    parser.add_argument(
+        "--backend",
+        choices=("codex", "claude"),
+        help="Use an authenticated local subscription CLI",
+        default=None,
+    )
+
     parser.add_argument("--api-base", help="Base URL for the LLM API", default=None)
 
-    parser.add_argument("--primary-model", help="Primary LLM model name", default=None)
+    parser.add_argument(
+        "--primary-model", "--model", dest="primary_model", help="Primary LLM model name"
+    )
 
     parser.add_argument("--secondary-model", help="Secondary LLM model name", default=None)
 
-    return parser.parse_args()
+    parser.add_argument("--reasoning-effort", help="Model reasoning effort", default=None)
+
+    args = parser.parse_args()
+    if args.backend and args.api_base is not None:
+        parser.error("--api-base cannot be used with --backend")
+    if args.backend and args.secondary_model is not None:
+        parser.error("--secondary-model cannot be used with --backend")
+    return args
+
+
+def _apply_llm_overrides(config: Config, args: argparse.Namespace) -> None:
+    """Apply CLI model settings to a loaded configuration."""
+    if args.backend:
+        model = args.primary_model or (
+            DEFAULT_CODEX_MODEL if args.backend == "codex" else DEFAULT_CLAUDE_MODEL
+        )
+        config.llm.primary_model = model
+        config.llm.secondary_model = None
+        config.llm.reasoning_effort = args.reasoning_effort
+        if args.backend == "codex" and config.llm.reasoning_effort is None:
+            config.llm.reasoning_effort = DEFAULT_CODEX_REASONING_EFFORT
+        config.llm.rebuild_models()
+        config.llm.update_model_params(
+            {
+                "init_client": init_codex if args.backend == "codex" else init_claude,
+                "system_message": config.prompt.system_message,
+            },
+            overwrite=True,
+        )
+        print(f"Using {args.backend} subscription backend with model: {model}")
+        return
+
+    if args.api_base:
+        config.llm.api_base = args.api_base
+        print(f"Using API base: {config.llm.api_base}")
+
+    if args.primary_model:
+        config.llm.primary_model = args.primary_model
+        print(f"Using primary model: {config.llm.primary_model}")
+
+    if args.secondary_model:
+        config.llm.secondary_model = args.secondary_model
+        print(f"Using secondary model: {config.llm.secondary_model}")
+
+    if args.primary_model or args.secondary_model:
+        config.llm.rebuild_models()
+        print("Applied CLI model overrides - active models:")
+        for i, model in enumerate(config.llm.models):
+            print(f"  Model {i+1}: {model.name} (weight: {model.weight})")
+
+    if args.reasoning_effort is not None:
+        config.llm.reasoning_effort = args.reasoning_effort
+        config.llm.update_model_params({"reasoning_effort": args.reasoning_effort}, overwrite=True)
+        print(f"Using reasoning effort: {args.reasoning_effort}")
 
 
 async def main_async() -> int:
@@ -79,29 +147,9 @@ async def main_async() -> int:
         return 1
 
     # Load base config from file or defaults
-    config = load_config(args.config)
+    config = load_config(args.config, ignore_api_keys=bool(args.backend))
 
-    # Create config object with command-line overrides
-    if args.api_base or args.primary_model or args.secondary_model:
-        # Apply command-line overrides
-        if args.api_base:
-            config.llm.api_base = args.api_base
-            print(f"Using API base: {config.llm.api_base}")
-
-        if args.primary_model:
-            config.llm.primary_model = args.primary_model
-            print(f"Using primary model: {config.llm.primary_model}")
-
-        if args.secondary_model:
-            config.llm.secondary_model = args.secondary_model
-            print(f"Using secondary model: {config.llm.secondary_model}")
-
-        # Rebuild models list to apply CLI overrides
-        if args.primary_model or args.secondary_model:
-            config.llm.rebuild_models()
-            print(f"Applied CLI model overrides - active models:")
-            for i, model in enumerate(config.llm.models):
-                print(f"  Model {i+1}: {model.name} (weight: {model.weight})")
+    _apply_llm_overrides(config, args)
 
     # Initialize OpenEvolve
     try:
