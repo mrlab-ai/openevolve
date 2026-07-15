@@ -294,6 +294,28 @@ docker run --rm -v $(pwd):/app ghcr.io/algorithmicsuperintelligence/openevolve:l
 
 OpenEvolve works with **any OpenAI-compatible API**:
 
+#### Subscription-backed CLIs
+
+To use an existing Codex or Claude subscription instead of an API key, install
+the provider CLI and sign in first (`codex login`, or run `claude` and complete
+its login flow). Then select it explicitly:
+
+```bash
+# Codex defaults to gpt-5.6-sol with max reasoning effort
+python openevolve-run.py initial_program.py evaluator.py --backend codex
+
+# Override the model or reasoning effort when the provider supports it
+python openevolve-run.py initial_program.py evaluator.py \
+  --backend codex --model gpt-5.6-sol --reasoning-effort max
+
+# Claude defaults to claude-fable-5 with the provider's default reasoning
+python openevolve-run.py initial_program.py evaluator.py --backend claude
+```
+
+The selected CLI model handles evolution, evaluation, and repair. No API key is
+needed; authentication and billing follow the active CLI login. Subscription
+calls have no OpenEvolve timeout, but Ctrl-C still cancels the running command.
+
 <details>
 <summary><b>🔥 OpenAI (Direct)</b></summary>
 
