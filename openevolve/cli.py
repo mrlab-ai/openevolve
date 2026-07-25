@@ -6,6 +6,7 @@ import argparse
 import asyncio
 import logging
 import os
+import re
 import sys
 from typing import Dict, List, Optional
 
@@ -19,6 +20,34 @@ from openevolve.model_profiles import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def find_latest_checkpoint(checkpoints_dir: str) -> Optional[str]:
+    """
+    Find the highest-numbered checkpoint_N directory
+
+    Args:
+        checkpoints_dir: Directory containing checkpoint_N subdirectories
+
+    Returns:
+        Path to the newest checkpoint, or None if there are none
+    """
+    if not os.path.isdir(checkpoints_dir):
+        return None
+
+    candidates = []
+    for name in os.listdir(checkpoints_dir):
+        path = os.path.join(checkpoints_dir, name)
+        if not os.path.isdir(path):
+            continue
+        match = re.fullmatch(r"checkpoint_(\d+)", name)
+        if match:
+            candidates.append((int(match.group(1)), path))
+
+    if not candidates:
+        return None
+
+    return max(candidates, key=lambda t: t[0])[1]
 
 
 def parse_args() -> argparse.Namespace:
@@ -36,7 +65,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", "-o", help="Output directory for results", default=None)
 
     parser.add_argument(
-        "--iterations", "-i", help="Maximum number of iterations", type=int, default=None
+        "--iterations",
+        "-i",
+        help="Number of iterations to run (additional iterations when resuming)",
+        type=int,
+        default=None,
+    )
+
+    parser.add_argument(
+        "--until-iteration",
+        "-u",
+        help="Run until this absolute iteration number in total, resuming included",
+        type=int,
+        default=None,
     )
 
     parser.add_argument(
@@ -55,6 +96,13 @@ def parse_args() -> argparse.Namespace:
         "--checkpoint",
         help="Path to checkpoint directory to resume from (e.g., openevolve_output/checkpoints/checkpoint_50)",
         default=None,
+    )
+
+    parser.add_argument(
+        "--auto-resume",
+        "-r",
+        action="store_true",
+        help="Resume from the newest checkpoint in the output directory, if any exists",
     )
 
     parser.add_argument(
@@ -79,6 +127,12 @@ def parse_args() -> argparse.Namespace:
         parser.error("--api-base cannot be used with --backend")
     if args.backend and args.secondary_model is not None:
         parser.error("--secondary-model cannot be used with --backend")
+    if args.checkpoint and args.auto_resume:
+        parser.error("--auto-resume cannot be used with --checkpoint")
+    if args.iterations is not None and args.until_iteration is not None:
+        parser.error("--until-iteration cannot be used with --iterations")
+    if args.until_iteration is not None and args.until_iteration < 1:
+        parser.error("--until-iteration must be at least 1")
     return args
 
 
@@ -160,16 +214,37 @@ async def main_async() -> int:
             output_dir=args.output,
         )
 
-        # Load from checkpoint if specified
-        if args.checkpoint:
-            if not os.path.exists(args.checkpoint):
-                print(f"Error: Checkpoint directory '{args.checkpoint}' not found")
-                return 1
-            print(f"Loading checkpoint from {args.checkpoint}")
-            openevolve.database.load(args.checkpoint)
-            print(
-                f"Checkpoint loaded successfully (iteration {openevolve.database.last_iteration})"
+        # Resolve which checkpoint to resume from
+        checkpoint_path = args.checkpoint
+        if args.auto_resume:
+            checkpoint_path = find_latest_checkpoint(
+                os.path.join(openevolve.output_dir, "checkpoints")
             )
+            if checkpoint_path is None:
+                print("No checkpoints found - starting a fresh run")
+
+        # Load from checkpoint if specified
+        completed_iterations = 0
+        if checkpoint_path:
+            if not os.path.exists(checkpoint_path):
+                print(f"Error: Checkpoint directory '{checkpoint_path}' not found")
+                return 1
+            print(f"Loading checkpoint from {checkpoint_path}")
+            openevolve.database.load(checkpoint_path)
+            completed_iterations = openevolve.database.last_iteration
+            print(f"Checkpoint loaded successfully (iteration {completed_iterations})")
+
+        # Translate an absolute iteration target into a relative iteration count
+        iterations = args.iterations
+        if args.until_iteration is not None:
+            iterations = args.until_iteration - completed_iterations
+            if iterations <= 0:
+                print(
+                    f"Already at iteration {completed_iterations}, "
+                    f"which meets the target of {args.until_iteration} - nothing to do"
+                )
+                return 0
+            print(f"Running {iterations} iterations to reach a total of {args.until_iteration}")
 
         # Override log level if specified
         if args.log_level:
@@ -177,24 +252,15 @@ async def main_async() -> int:
 
         # Run evolution
         best_program = await openevolve.run(
-            iterations=args.iterations,
+            iterations=iterations,
             target_score=args.target_score,
-            checkpoint_path=args.checkpoint,
+            checkpoint_path=checkpoint_path,
         )
 
         # Get the checkpoint path
-        checkpoint_dir = os.path.join(openevolve.output_dir, "checkpoints")
-        latest_checkpoint = None
-        if os.path.exists(checkpoint_dir):
-            checkpoints = [
-                os.path.join(checkpoint_dir, d)
-                for d in os.listdir(checkpoint_dir)
-                if os.path.isdir(os.path.join(checkpoint_dir, d))
-            ]
-            if checkpoints:
-                latest_checkpoint = sorted(
-                    checkpoints, key=lambda x: int(x.split("_")[-1]) if "_" in x else 0
-                )[-1]
+        latest_checkpoint = find_latest_checkpoint(
+            os.path.join(openevolve.output_dir, "checkpoints")
+        )
 
         print(f"\nEvolution complete!")
         print(f"Best program metrics:")
@@ -207,7 +273,7 @@ async def main_async() -> int:
 
         if latest_checkpoint:
             print(f"\nLatest checkpoint saved at: {latest_checkpoint}")
-            print(f"To resume, use: --checkpoint {latest_checkpoint}")
+            print(f"To resume, use: --checkpoint {latest_checkpoint} (or --auto-resume)")
 
         return 0
 
