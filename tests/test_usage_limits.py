@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 
 from openevolve.llm.subscription import _set_shutdown_event, init_codex
 from openevolve.llm.usage_limits import (
+    SubscriptionFatal,
     UsageLimitHandoff,
     UsageLimitHit,
     codex_diagnostics,
@@ -159,6 +160,33 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(TimeoutError):
                 await init_codex(config()).generate("p")
         term.assert_awaited_once()
+
+    async def test_dead_login_is_fatal_not_retried(self):
+        dead = Process(stderr=b"ERROR: Your access token could not be refreshed. Please log in again.\n",
+                       returncode=1)
+        create = AsyncMock(return_value=dead)
+        cfg = config()
+        cfg.retries = 3
+        with tempfile.TemporaryDirectory() as d, \
+                patch.dict(os.environ, {"OPENEVOLVE_HANDOFF_FILE": f"{d}/h.json"}), \
+                patch("openevolve.llm.subscription.asyncio.create_subprocess_exec", create), \
+                patch("openevolve.llm.subscription.asyncio.sleep", AsyncMock()):
+            with self.assertRaises(SubscriptionFatal):
+                await init_codex(cfg).generate("p")
+            record = json.load(open(f"{d}/h.json"))
+        self.assertEqual(record["reason"], "fatal")
+        self.assertEqual(create.await_count, 1)
+
+    async def test_model_text_about_tokens_is_not_fatal(self):
+        out = "\n".join(json.dumps(e) for e in (
+            {"type": "item.completed", "item": {"type": "agent_message",
+                                                "text": "the access token could not be refreshed"}},
+        )).encode()
+        create = AsyncMock(return_value=Process(stdout=out, returncode=1))
+        with patch("openevolve.llm.subscription.asyncio.create_subprocess_exec", create):
+            with self.assertRaises(RuntimeError) as ctx:
+                await init_codex(config()).generate("p")
+        self.assertNotIsInstance(ctx.exception, SubscriptionFatal)
 
 
 if __name__ == "__main__":

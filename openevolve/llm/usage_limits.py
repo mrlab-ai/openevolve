@@ -43,6 +43,28 @@ LIMIT_PATTERNS = [
 ]
 
 
+# Failures that never clear on their own (a dead login, a broken sandbox).
+# Retrying them only turns every remaining iteration into a quick failure, so
+# the run is stopped instead and not resubmitted. Mirrors fatal_patterns in
+# the autoresearch driver.yaml (codex + claude adapters).
+FATAL_PATTERNS = [
+    re.compile(p, re.I)
+    for p in (
+        r"access token could not be refreshed",
+        r"could not be refreshed",
+        r"failed to authenticate",
+        r"oauth session expired",
+        r"not logged in",
+        r"bwrap: Creating new namespace failed",
+        r"fs sandbox helper failed(?: with status|:)",
+    )
+]
+
+
+class SubscriptionFatal(RuntimeError):
+    """A CLI failure that retrying cannot fix; the run must stop for a human."""
+
+
 class UsageLimitHit(RuntimeError):
     """The provider rejected a call because a quota window is spent."""
 
@@ -86,6 +108,10 @@ def codex_diagnostics(stdout: str, stderr: str) -> str:
         if line.startswith("ERROR:") and not line.startswith("ERROR: Reconnecting..."):
             parts.append(line)
     return "\n".join(parts)
+
+
+def match_fatal(text: str) -> bool:
+    return any(p.search(text) for p in FATAL_PATTERNS)
 
 
 def match_limit(diagnostics: str) -> bool:
@@ -163,6 +189,10 @@ def write_handoff(path: str, *, resume_at: float, message: str, reason: str) -> 
     with open(tmp, "w") as f:
         json.dump(record, f, indent=2)
     os.replace(tmp, path)
+
+
+# Handoff-file reasons after which the run must NOT be resumed automatically.
+FATAL_REASONS = ("fatal", "llm_failures")
 
 
 def handoff_requested() -> bool:

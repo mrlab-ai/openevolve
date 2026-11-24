@@ -686,6 +686,7 @@ class ProcessParallelController:
 
         next_iteration = current_iteration
         completed_iterations = 0
+        consecutive_llm_failures = 0
 
         # Early stopping tracking
         early_stopping_enabled = self.config.early_stopping_patience is not None
@@ -751,7 +752,7 @@ class ProcessParallelController:
                 # is redone on resume instead of recording a spurious failure.
                 if handoff_requested():
                     logger.warning(
-                        f"Usage-limit handoff requested: discarding iteration "
+                        f"Stop requested (usage-limit handoff or fatal CLI error): discarding iteration "
                         f"{completed_iteration} and stopping (resume from checkpoint)"
                     )
                     self.handoff_triggered = True
@@ -759,7 +760,33 @@ class ProcessParallelController:
 
                 if result.error:
                     logger.warning(f"Iteration {completed_iteration} error: {result.error}")
+                    # A run of iterations whose model call itself failed (after
+                    # all retries) means the backend is broken, not that the
+                    # candidates are bad: stop rather than burn the remaining
+                    # iterations on instant failures. Unparseable answers do
+                    # not count -- the call worked.
+                    if result.error.startswith("LLM generation failed"):
+                        consecutive_llm_failures += 1
+                        limit = int(os.environ.get("OPENEVOLVE_MAX_CONSECUTIVE_LLM_FAILURES", "5"))
+                        if limit > 0 and consecutive_llm_failures >= limit:
+                            logger.error(
+                                f"{consecutive_llm_failures} consecutive LLM call failures "
+                                f"(last: {result.error}) - stopping the run"
+                            )
+                            handoff_file = os.environ.get("OPENEVOLVE_HANDOFF_FILE")
+                            if handoff_file:
+                                write_handoff(
+                                    handoff_file,
+                                    resume_at=time.time(),
+                                    message=result.error,
+                                    reason="llm_failures",
+                                )
+                            self.handoff_triggered = True
+                            break
+                    else:
+                        consecutive_llm_failures = 0
                 elif result.child_program_dict:
+                    consecutive_llm_failures = 0
                     # Reconstruct program from dict
                     child_program = Program(**result.child_program_dict)
 

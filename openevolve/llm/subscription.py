@@ -12,9 +12,11 @@ from typing import Any, Dict, List
 from openevolve.llm.base import LLMInterface
 from openevolve.llm.openai import _build_display_prompt
 from openevolve.llm.usage_limits import (
+    SubscriptionFatal,
     UsageLimitHandoff,
     UsageLimitHit,
     codex_diagnostics,
+    match_fatal,
     match_limit,
     parse_reset_epoch,
     plan_limit_response,
@@ -124,6 +126,18 @@ class SubscriptionLLM(LLMInterface):
                 self.total_calls += 1
                 return text
             except asyncio.CancelledError:
+                raise
+            except SubscriptionFatal as fatal:
+                # Never retried: stop the whole run (see usage_limits.FATAL_PATTERNS).
+                handoff_file = os.environ.get("OPENEVOLVE_HANDOFF_FILE")
+                if handoff_file:
+                    write_handoff(
+                        handoff_file,
+                        resume_at=time.time(),
+                        message=str(fatal),
+                        reason="fatal",
+                    )
+                logger.error("%s CLI fatal error - stopping the run: %s", self.provider, fatal)
                 raise
             except UsageLimitHit as hit:
                 # A spent quota is not a failed attempt: it consumes no retry.
@@ -241,6 +255,7 @@ class SubscriptionLLM(LLMInterface):
         """Raise UsageLimitHit if the CLI's error text says the quota is spent.
 
         Only error-bearing text is inspected, never the model's own answer.
+        Raises SubscriptionFatal first if the failure cannot clear by itself.
         """
         if self.provider == "codex":
             diagnostics = codex_diagnostics(output, error_output)
@@ -252,6 +267,13 @@ class SubscriptionLLM(LLMInterface):
                     diagnostics += "\n" + json.dumps(payload)
             except ValueError:
                 pass
+        # stderr carries no model text in --json / json output mode, so it is
+        # scanned whole for fatal errors, like the driver's fatal_patterns.
+        fatal_text = error_output + "\n" + diagnostics
+        if match_fatal(fatal_text):
+            raise SubscriptionFatal(
+                f"{self.provider} CLI fatal error: {fatal_text.strip()[-2000:]}"
+            )
         if diagnostics and match_limit(diagnostics):
             raise UsageLimitHit(
                 f"{self.provider} usage limit: {diagnostics[-2000:]}",
