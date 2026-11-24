@@ -145,6 +145,21 @@ class AdapterTests(unittest.IsolatedAsyncioTestCase):
                 patch("openevolve.llm.subscription._sleep_unless_shutdown", AsyncMock()):
             self.assertEqual(await init_codex(config()).generate("p"), "ok")
 
+    async def test_call_timeout_kills_and_fails_attempt(self):
+        class Hang(Process):
+            async def communicate(self, value):
+                import asyncio
+                await asyncio.sleep(3600)
+
+        create = AsyncMock(return_value=Hang())
+        term = AsyncMock()
+        with patch.dict(os.environ, {"OPENEVOLVE_SUBSCRIPTION_TIMEOUT_SECONDS": "0.3"}), \
+                patch("openevolve.llm.subscription.asyncio.create_subprocess_exec", create), \
+                patch("openevolve.llm.subscription._terminate_process", term):
+            with self.assertRaises(TimeoutError):
+                await init_codex(config()).generate("p")
+        term.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -199,13 +199,21 @@ class SubscriptionLLM(LLMInterface):
                 ) from error
 
             communication = asyncio.create_task(process.communicate(prompt.encode()))
+            # Optional wall-clock cap on one CLI call (off by default). A hung
+            # call then fails like any other attempt and is retried.
+            call_timeout = float(os.environ.get("OPENEVOLVE_SUBSCRIPTION_TIMEOUT_SECONDS") or 0)
+            give_up_at = time.monotonic() + call_timeout if call_timeout > 0 else None
             try:
                 while not communication.done():
                     if _shutdown_requested():
                         raise asyncio.CancelledError
+                    if give_up_at is not None and time.monotonic() > give_up_at:
+                        raise TimeoutError(
+                            f"{self.provider} CLI call exceeded {call_timeout:.0f}s"
+                        )
                     await asyncio.wait({communication}, timeout=_SHUTDOWN_POLL_SECONDS)
                 stdout, stderr = communication.result()
-            except asyncio.CancelledError:
+            except (asyncio.CancelledError, TimeoutError):
                 communication.cancel()
                 await asyncio.gather(communication, return_exceptions=True)
                 await asyncio.shield(_terminate_process(process))
