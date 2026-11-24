@@ -631,8 +631,11 @@ class OpenEvolve:
         # Save final checkpoint if needed
         # Note: start_iteration here is the evolution start (1 for fresh start, not 0)
         # max_iterations is the number of evolution iterations to run
+        # Always checkpoint the final iteration, not only on interval multiples:
+        # a resumable run (--auto-resume) recognises completion by finding a
+        # checkpoint at max_iterations.
         final_iteration = start_iteration + max_iterations - 1
-        if final_iteration > 0 and final_iteration % self.config.checkpoint_interval == 0:
+        if final_iteration > 0:
             self._save_checkpoint(final_iteration)
 
     def _save_best_program(self, program: Optional[Program] = None) -> None:
