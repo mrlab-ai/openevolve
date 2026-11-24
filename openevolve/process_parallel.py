@@ -5,6 +5,7 @@ Process-based parallel controller for true parallelism
 import asyncio
 import logging
 import multiprocessing as mp
+import os
 import pickle
 import signal
 import time
@@ -17,6 +18,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from openevolve.config import Config
 from openevolve.database import Program, ProgramDatabase
 from openevolve.utils.metrics_utils import safe_numeric_average
+
+from openevolve.llm.usage_limits import handoff_requested, write_handoff
 
 logger = logging.getLogger(__name__)
 
@@ -488,6 +491,7 @@ class ProcessParallelController:
 
         _set_shutdown_event(self.shutdown_event)
         self.early_stopping_triggered = False
+        self.handoff_triggered = False
 
         # Number of worker processes
         self.num_workers = config.evaluator.parallel_evaluations
@@ -741,6 +745,18 @@ class ProcessParallelController:
                             for k in ("prompt_tokens", "completion_tokens", "calls"):
                                 self._token_usage[role]["by_model"][name][k] += m.get(k, 0)
 
+                # A subscription usage limit too distant to wait out was hit
+                # during this iteration (its LLM call or a repair call). Its
+                # result is not a genuine outcome -- drop it, so the iteration
+                # is redone on resume instead of recording a spurious failure.
+                if handoff_requested():
+                    logger.warning(
+                        f"Usage-limit handoff requested: discarding iteration "
+                        f"{completed_iteration} and stopping (resume from checkpoint)"
+                    )
+                    self.handoff_triggered = True
+                    break
+
                 if result.error:
                     logger.warning(f"Iteration {completed_iteration} error: {result.error}")
                 elif result.child_program_dict:
@@ -948,6 +964,26 @@ class ProcessParallelController:
 
             completed_iterations += 1
 
+            # Wall-clock deadline (e.g. the SLURM job's end minus a reserve for
+            # one more iteration): stop after this fully processed iteration
+            # rather than be killed mid-way through the next one.
+            deadline = os.environ.get("OPENEVOLVE_DEADLINE_EPOCH")
+            if deadline and time.time() >= float(deadline):
+                logger.warning(
+                    f"Wall-clock deadline reached after iteration {completed_iteration}; "
+                    f"stopping for resume from checkpoint"
+                )
+                handoff_file = os.environ.get("OPENEVOLVE_HANDOFF_FILE")
+                if handoff_file:
+                    write_handoff(
+                        handoff_file,
+                        resume_at=time.time(),
+                        message="wall-clock deadline",
+                        reason="deadline",
+                    )
+                self.handoff_triggered = True
+                break
+
             # Remove completed iteration from island tracking
             for island_id, iteration_list in island_pending.items():
                 if completed_iteration in iteration_list:
@@ -967,6 +1003,12 @@ class ProcessParallelController:
                         island_pending[island_id].append(next_iteration)
                         next_iteration += 1
                         break  # Only submit one iteration per completion to maintain balance
+
+        # A handoff stops the run like a shutdown request: queued iterations are
+        # cancelled, in-flight subscription calls abort, and the controller
+        # saves a checkpoint at the last completed iteration.
+        if self.handoff_triggered:
+            self.shutdown_event.set()
 
         # Handle shutdown
         if self.shutdown_event.is_set():

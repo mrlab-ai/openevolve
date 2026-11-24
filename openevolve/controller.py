@@ -611,7 +611,18 @@ class OpenEvolve:
 
         # Check if shutdown or early stopping was triggered
         if self.parallel_controller.shutdown_event.is_set():
-            logger.info("Evolution stopped due to shutdown request")
+            # Checkpoint whatever completed since the last interval checkpoint,
+            # so a resumed run (usage-limit handoff, wall-clock deadline,
+            # SIGTERM) continues from here rather than redoing those iterations.
+            last = self.database.last_iteration
+            if last > 0:
+                logger.info(
+                    f"Evolution stopped due to shutdown request - saving checkpoint at "
+                    f"last completed iteration {last}"
+                )
+                self._save_checkpoint(last)
+            else:
+                logger.info("Evolution stopped due to shutdown request")
             return
         elif self.parallel_controller.early_stopping_triggered:
             logger.info("Evolution stopped due to early stopping - saving final checkpoint")

@@ -6,10 +6,20 @@ import logging
 import os
 import signal
 import tempfile
+import time
 from typing import Any, Dict, List
 
 from openevolve.llm.base import LLMInterface
 from openevolve.llm.openai import _build_display_prompt
+from openevolve.llm.usage_limits import (
+    UsageLimitHandoff,
+    UsageLimitHit,
+    codex_diagnostics,
+    match_limit,
+    parse_reset_epoch,
+    plan_limit_response,
+    write_handoff,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +33,18 @@ _AUTH_AND_ROUTING_ENV_VARS = {
 }
 _SHUTDOWN_EVENT = None
 _SHUTDOWN_POLL_SECONDS = 0.1
+
+
+async def _sleep_unless_shutdown(seconds: float) -> None:
+    """Sleep, waking early (and cancelling) when shutdown is requested."""
+    deadline = time.monotonic() + max(0.0, seconds)
+    while True:
+        if _shutdown_requested():
+            raise asyncio.CancelledError
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        await asyncio.sleep(min(remaining, 5.0))
 
 
 def _set_shutdown_event(event: Any) -> None:
@@ -88,7 +110,9 @@ class SubscriptionLLM(LLMInterface):
         retry_delay = kwargs.get("retry_delay", self.retry_delay) or 0
         effort = kwargs.get("reasoning_effort", self.reasoning_effort)
 
-        for attempt in range(retries + 1):
+        attempt = 0
+        limit_waits = 0
+        while True:
             if _shutdown_requested():
                 raise asyncio.CancelledError
             try:
@@ -101,6 +125,32 @@ class SubscriptionLLM(LLMInterface):
                 return text
             except asyncio.CancelledError:
                 raise
+            except UsageLimitHit as hit:
+                # A spent quota is not a failed attempt: it consumes no retry.
+                limit_waits += 1
+                action, value = plan_limit_response(hit, limit_waits)
+                if action == "handoff":
+                    write_handoff(
+                        os.environ["OPENEVOLVE_HANDOFF_FILE"],
+                        resume_at=value,
+                        message=str(hit),
+                        reason="usage_limit",
+                    )
+                    logger.warning(
+                        "%s usage limit; reset too far to wait (resume at %s) - handing off",
+                        self.provider,
+                        time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(value)),
+                    )
+                    raise UsageLimitHandoff(str(hit)) from hit
+                logger.warning(
+                    "%s usage limit (wait %d); sleeping %.0fs before retrying the same call: %s",
+                    self.provider,
+                    limit_waits,
+                    value,
+                    str(hit)[-300:],
+                )
+                await _sleep_unless_shutdown(value)
+                continue
             except Exception as error:
                 if attempt == retries:
                     raise
@@ -113,9 +163,8 @@ class SubscriptionLLM(LLMInterface):
                 )
                 if _shutdown_requested():
                     raise asyncio.CancelledError
+                attempt += 1
                 await asyncio.sleep(retry_delay)
-
-        raise AssertionError("unreachable")
 
     async def _invoke(
         self, prompt: str, effort: str | None, system_message: str
@@ -165,6 +214,7 @@ class SubscriptionLLM(LLMInterface):
         output = stdout.decode(errors="replace")
         error_output = stderr.decode(errors="replace").strip()
         if process.returncode:
+            self._raise_if_limited(output, error_output)
             detail = error_output or output.strip() or "no error output"
             raise RuntimeError(
                 f"{self.provider} CLI exited with status {process.returncode}: {detail}"
@@ -173,8 +223,32 @@ class SubscriptionLLM(LLMInterface):
         try:
             return self._parse(output)
         except (AttributeError, json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
+            # A failed turn can still exit 0 (codex emits turn.failed and no
+            # agent message), so a missing answer is checked for a limit too.
+            self._raise_if_limited(output, error_output)
             detail = error_output or str(error)
             raise RuntimeError(f"{self.provider} CLI returned malformed JSON: {detail}") from error
+
+    def _raise_if_limited(self, output: str, error_output: str) -> None:
+        """Raise UsageLimitHit if the CLI's error text says the quota is spent.
+
+        Only error-bearing text is inspected, never the model's own answer.
+        """
+        if self.provider == "codex":
+            diagnostics = codex_diagnostics(output, error_output)
+        else:
+            diagnostics = error_output
+            try:
+                payload = json.loads(output)
+                if isinstance(payload, dict) and payload.get("is_error"):
+                    diagnostics += "\n" + json.dumps(payload)
+            except ValueError:
+                pass
+        if diagnostics and match_limit(diagnostics):
+            raise UsageLimitHit(
+                f"{self.provider} usage limit: {diagnostics[-2000:]}",
+                parse_reset_epoch(diagnostics + "\n" + error_output),
+            )
 
     def _command(self, effort: str | None, system_message: str) -> list[str]:
         if self.provider == "codex":
