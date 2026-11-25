@@ -103,8 +103,30 @@ class PlanTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # Never ask the real account for reset times from a test.
+        self._q = patch("openevolve.llm.subscription.query_reset_epoch", return_value=None)
+        self._q.start()
+
     def tearDown(self):
+        self._q.stop()
         _set_shutdown_event(None)
+
+    async def test_workspace_out_of_credits_is_a_limit(self):
+        msg = "Your workspace is out of credits. Ask your workspace owner to refill in order to continue."
+        out = "\n".join(json.dumps(e) for e in (
+            {"type": "error", "message": msg}, {"type": "turn.failed", "error": {"message": msg}},
+        )).encode()
+        create = AsyncMock(side_effect=[Process(stdout=out, returncode=1), Process(stdout=ok_output("done"))])
+        self._q.stop()
+        with tempfile.TemporaryDirectory() as d, \
+                patch.dict(os.environ, {"OPENEVOLVE_HANDOFF_FILE": f"{d}/h.json"}), \
+                patch("openevolve.llm.subscription.query_reset_epoch", return_value=int(time.time()) + 600), \
+                patch("openevolve.llm.subscription.asyncio.create_subprocess_exec", create), \
+                patch("openevolve.llm.subscription._sleep_unless_shutdown", AsyncMock()) as sleep:
+            self.assertEqual(await init_codex(config()).generate("p"), "done")
+        self._q.start()
+        self.assertGreater(sleep.await_args.args[0], 600)   # waited until the queried reset
 
     async def test_short_limit_is_waited_out_and_same_call_retried(self):
         soon = int(time.time()) + 60

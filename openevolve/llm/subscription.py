@@ -12,6 +12,7 @@ from typing import Any, Dict, List
 from openevolve.llm.base import LLMInterface
 from openevolve.llm.openai import _build_display_prompt
 from openevolve.llm.usage_limits import (
+    query_reset_epoch,
     SubscriptionFatal,
     UsageLimitHandoff,
     UsageLimitHit,
@@ -275,10 +276,10 @@ class SubscriptionLLM(LLMInterface):
                 f"{self.provider} CLI fatal error: {fatal_text.strip()[-2000:]}"
             )
         if diagnostics and match_limit(diagnostics):
-            raise UsageLimitHit(
-                f"{self.provider} usage limit: {diagnostics[-2000:]}",
-                parse_reset_epoch(diagnostics + "\n" + error_output),
-            )
+            reset = parse_reset_epoch(diagnostics + "\n" + error_output)
+            if reset is None and self.provider == "codex":
+                reset = query_reset_epoch()
+            raise UsageLimitHit(f"{self.provider} usage limit: {diagnostics[-2000:]}", reset)
 
     def _command(self, effort: str | None, system_message: str) -> list[str]:
         if self.provider == "codex":

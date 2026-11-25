@@ -38,6 +38,10 @@ LIMIT_PATTERNS = [
         r"quota",
         r"resource.*exhausted",
         r"at capacity",
+        # Workspace (e.g. sci_plus / Business) plans report a spent window as
+        # "Your workspace is out of credits. Ask your workspace owner to refill".
+        r"out of credits",
+        r"owner to refill",
         r"(api error|http|status(?: code)?)[^0-9]{0,16}429\b",
     )
 ]
@@ -167,6 +171,57 @@ def parse_reset_epoch(blob: str, now: Optional[float] = None) -> Optional[int]:
         return int(now + parts.get("h", 0) * 3600 + parts.get("m", 0) * 60 + parts.get("s", 0))
 
     return None
+
+
+def query_reset_epoch(now: Optional[float] = None) -> Optional[int]:
+    """Ask the CLI's own account state when a spent window reopens.
+
+    For limit notices that state no reset time ("out of credits"): reads
+    account/rateLimits/read from a short-lived `codex app-server` (no model
+    call) and returns the latest reset among windows at >= 100 %; None if no
+    window is spent or anything goes wrong (the caller then polls).
+    """
+    import subprocess
+
+    now = time.time() if now is None else now
+    msgs = "\n".join(json.dumps(m) for m in (
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize",
+         "params": {"clientInfo": {"name": "openevolve-limits", "version": "1"}}},
+        {"jsonrpc": "2.0", "method": "initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "account/rateLimits/read"},
+    )) + "\n"
+    try:
+        p = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                             text=True, cwd="/tmp")
+        try:
+            p.stdin.write(msgs)
+            p.stdin.flush()
+            deadline = time.time() + 60
+            result = None
+            for line in p.stdout:
+                try:
+                    msg = json.loads(line)
+                except ValueError:
+                    continue
+                if msg.get("id") == 2:
+                    result = msg.get("result")
+                    break
+                if time.time() > deadline:
+                    break
+        finally:
+            p.kill()
+            p.wait()
+        windows = [w for w in ((result or {}).get("rateLimits") or {}).values()
+                   if isinstance(w, dict) and w.get("resetsAt")]
+        full = [int(w["resetsAt"]) for w in windows
+                if float(w.get("usedPercent") or 0) >= 100 and w["resetsAt"] > now]
+        # Only a window that is actually spent says when the limit lifts; any
+        # other reset (e.g. a weekly window days away at 30 %) is unrelated, and
+        # trusting it would hand a run off for days on a transient rate limit.
+        return max(full) if full else None
+    except Exception:
+        return None
 
 
 def write_handoff(path: str, *, resume_at: float, message: str, reason: str) -> None:
